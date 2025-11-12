@@ -94,7 +94,7 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
         img.onerror = (err) => reject(new Error("Failed to load image for cropping." + err));
       });
 
-      const PADDING = -4; // Inset for cropping
+      const PADDING = 4; // Outset for cropping to add a small border
       const enrichedCardsPromises = detectedCardsRaw.map(async (card) => {
           const [x_center_norm, y_center_norm, width_norm, height_norm] = card.bounding_box;
             
