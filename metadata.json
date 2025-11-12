@@ -1,0 +1,5 @@
+{
+  "name": "Project Arceus TCG Scanner",
+  "description": "A computer-vision powered Pokémon TCG collection platform. Upload scans of your cards, let AI identify and enrich them with data, and manage your collection in a visual dashboard.",
+  "requestFramePermissions": []
+}
