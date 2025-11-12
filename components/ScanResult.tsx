@@ -1,7 +1,8 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { MultiScanResult, DetectedCard, PokemonCard } from '../types';
-import { AddIcon, RetryIcon, CheckIcon } from './icons';
+import { AddIcon, RetryIcon, CheckIcon, DebugIcon } from './icons';
+import DevPanel from './DevPanel';
 
 interface ScanResultProps {
   scanResult: MultiScanResult;
@@ -9,16 +10,25 @@ interface ScanResultProps {
   onRetry: () => void;
 }
 
-const DetectedCardDisplay: React.FC<{
+interface DetectedCardDisplayProps {
   card: DetectedCard;
   onAdd: () => void;
   isAdded: boolean;
-}> = ({ card, onAdd, isAdded }) => {
+  onClick: () => void;
+  isSelected: boolean;
+}
+
+const DetectedCardDisplay: React.FC<DetectedCardDisplayProps> = ({ card, onAdd, isAdded, onClick, isSelected }) => {
   const confidenceColor =
     card.confidence > 0.9 ? 'text-green-400' : card.confidence > 0.8 ? 'text-yellow-400' : 'text-red-400';
 
   return (
-    <div className="bg-gray-800 rounded-lg overflow-hidden shadow-lg border border-gray-700 flex flex-col">
+    <div 
+        onClick={onClick}
+        className={`bg-gray-800 rounded-lg overflow-hidden shadow-lg border flex flex-col cursor-pointer transition-all duration-200 ${
+            isSelected ? 'border-blue-500 scale-105 shadow-blue-500/30' : 'border-gray-700'
+        }`}
+    >
       <div className="bg-gray-900 flex items-center justify-center aspect-[3/4]">
         {card.croppedImageUrl ? (
           <img src={card.croppedImageUrl} alt={card.name} className="object-contain w-full h-full" />
@@ -36,7 +46,10 @@ const DetectedCardDisplay: React.FC<{
                 {(card.confidence * 100).toFixed(1)}%
             </p>
             <button
-                onClick={onAdd}
+                onClick={(e) => {
+                    e.stopPropagation(); // Prevent card selection when adding
+                    onAdd();
+                }}
                 disabled={isAdded}
                 className={`inline-flex items-center justify-center px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                 isAdded
@@ -54,77 +67,16 @@ const DetectedCardDisplay: React.FC<{
 };
 
 const ScanResult: React.FC<ScanResultProps> = ({ scanResult, onAddToCollection, onRetry }) => {
-  const [cardsWithImages, setCardsWithImages] = useState<DetectedCard[]>([]);
   const [addedCards, setAddedCards] = useState<Set<number>>(new Set());
+  const [isDevPanelOpen, setIsDevPanelOpen] = useState(false);
+  const [selectedCardIndex, setSelectedCardIndex] = useState<number | null>(null);
 
+  // Reset selection and added cards when new results come in
   useEffect(() => {
-    const cropImages = async () => {
-      if (!scanResult.originalImageUrls || scanResult.originalImageUrls.length === 0) {
-        setCardsWithImages(scanResult.cards_detected);
-        return;
-      }
-      
-      const imageLoadPromises = scanResult.originalImageUrls.map(url => {
-        return new Promise<HTMLImageElement>((resolve, reject) => {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.src = url;
-          img.onload = () => resolve(img);
-          img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
-        });
-      });
-
-      try {
-        const originalImages = await Promise.all(imageLoadPromises);
-        const PADDING = 5;
-
-        const processedCards = scanResult.cards_detected.map(card => {
-          const originalImage = originalImages[card.imageIndex];
-          if (!originalImage) return card;
-
-          const [x_center_norm, y_center_norm, width_norm, height_norm] = card.bounding_box;
-
-          const abs_width = width_norm * originalImage.width;
-          const abs_height = height_norm * originalImage.height;
-          const abs_x_center = x_center_norm * originalImage.width;
-          const abs_y_center = y_center_norm * originalImage.height;
-
-          let sx = abs_x_center - (abs_width / 2);
-          let sy = abs_y_center - (abs_height / 2);
-
-          let sWidth = abs_width;
-          let sHeight = abs_height;
-
-          sx = Math.max(0, sx - PADDING);
-          sy = Math.max(0, sy - PADDING);
-          const sWidthPadded = sWidth + (PADDING * 2);
-          const sHeightPadded = sHeight + (PADDING * 2);
-
-          sWidth = Math.min(originalImage.width - sx, sWidthPadded);
-          sHeight = Math.min(originalImage.height - sy, sHeightPadded);
-          
-          const canvas = document.createElement('canvas');
-          canvas.width = sWidth;
-          canvas.height = sHeight;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(originalImage, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
-            return { ...card, croppedImageUrl: canvas.toDataURL('image/jpeg') };
-          }
-          return card;
-        });
-        setCardsWithImages(processedCards);
-
-      } catch (error) {
-        console.error("Failed to load one or more images for cropping.", error);
-        setCardsWithImages(scanResult.cards_detected);
-      }
-    };
-
-    if (scanResult.cards_detected.length > 0) {
-      cropImages();
-    }
+    setSelectedCardIndex(null);
+    setAddedCards(new Set());
   }, [scanResult]);
+
 
   const handleAdd = useCallback((card: DetectedCard, index: number) => {
     if (addedCards.has(index) || !card.croppedImageUrl) return;
@@ -144,19 +96,35 @@ const ScanResult: React.FC<ScanResultProps> = ({ scanResult, onAddToCollection, 
   }, [onAddToCollection, addedCards]);
 
   const handleAddAll = useCallback(() => {
-      cardsWithImages.forEach((card, index) => {
+      scanResult.cards_detected.forEach((card, index) => {
           if(!addedCards.has(index) && card.croppedImageUrl) {
               handleAdd(card, index);
           }
       });
-  }, [cardsWithImages, addedCards, handleAdd]);
+  }, [scanResult.cards_detected, addedCards, handleAdd]);
+
+  const handleCardClick = (index: number) => {
+    setSelectedCardIndex(index);
+    if (!isDevPanelOpen) {
+      setIsDevPanelOpen(true);
+    }
+  };
   
-  const allCardsAdded = cardsWithImages.length > 0 && addedCards.size === cardsWithImages.length;
+  const allCardsAdded = scanResult.cards_detected.length > 0 && addedCards.size === scanResult.cards_detected.length;
 
   return (
     <div className="w-full max-w-7xl animate-fade-in">
         <div className="flex flex-col md:flex-row justify-between items-center mb-6">
-            <h2 className="text-3xl font-bold text-white">Scan Results: <span className="text-blue-400">{scanResult.total_detected} Cards Found</span></h2>
+            <div className="flex items-center gap-4">
+                <h2 className="text-3xl font-bold text-white">Scan Results: <span className="text-blue-400">{scanResult.total_detected} Cards Found</span></h2>
+                <button
+                    onClick={() => setIsDevPanelOpen(true)}
+                    title="Open Debug Panel"
+                    className="p-2 rounded-full text-gray-400 bg-gray-800 hover:bg-gray-700 hover:text-white transition-colors"
+                >
+                    <DebugIcon className="h-5 w-5" />
+                </button>
+            </div>
             <div className="flex gap-4 mt-4 md:mt-0">
                 <button
                     onClick={handleAddAll}
@@ -183,15 +151,27 @@ const ScanResult: React.FC<ScanResultProps> = ({ scanResult, onAddToCollection, 
         )}
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-            {cardsWithImages.map((card, index) => (
+            {scanResult.cards_detected.map((card, index) => (
                 <DetectedCardDisplay 
                     key={`${card.name}-${index}`}
                     card={card}
                     onAdd={() => handleAdd(card, index)}
                     isAdded={addedCards.has(index)}
+                    onClick={() => handleCardClick(index)}
+                    isSelected={selectedCardIndex === index}
                 />
             ))}
         </div>
+
+        <DevPanel 
+            isOpen={isDevPanelOpen}
+            onClose={() => {
+                setIsDevPanelOpen(false);
+                setSelectedCardIndex(null);
+            }}
+            scanResult={scanResult}
+            selectedCardIndex={selectedCardIndex}
+        />
     </div>
   );
 };

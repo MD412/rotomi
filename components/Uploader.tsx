@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
-import { identifyCards } from '../services/geminiService';
-import { MultiScanResult } from '../types';
+import { identifyCardsInImage } from '../services/geminiService';
+import { MultiScanResult, DetectedCard } from '../types';
 import { UploadIcon, ProcessingIcon } from './icons';
 
 // Add type declaration for the HEIC conversion library
@@ -19,12 +19,11 @@ interface UploaderProps {
 }
 
 const processingSteps = [
-  "Normalizing aspect ratio...",
-  "Denoising and color correcting...",
-  "Locating cards with YOLOv8...",
-  "Generating embeddings with OpenCLIP...",
-  "Resolving with Gemini...",
-  "Enriching metadata...",
+    "Preparing image...",
+    "Scanning with Gemini...",
+    "Analyzing results...",
+    "Cropping card images...",
+    "Finalizing scan...",
 ];
 
 const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
@@ -36,67 +35,111 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
   const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
+    if (files.length > 1) {
+        setError("Multi-image upload is not supported in this version. Please upload one image at a time.");
+        return;
+    }
+    const file = files[0];
 
     setIsProcessing(true);
     setError(null);
     setCurrentStep(0);
-    setProcessingMessage(`Preparing ${files.length} image${files.length > 1 ? 's' : ''}...`);
+    setProcessingMessage('Starting process...');
 
     let stepInterval: number | undefined;
 
     try {
-      const fileArray = Array.from(files);
-      
-      const conversionPromises = fileArray.map(async (file) => {
-        const fileNameLower = file.name.toLowerCase();
-        if ((fileNameLower.endsWith('.heic') || fileNameLower.endsWith('.heif'))) {
-          if (!window.heic2any) {
-            throw new Error("HEIC conversion library failed to load. Please try another format.");
-          }
-          setProcessingMessage(`Converting ${file.name}...`);
-          const convertedBlob = await window.heic2any({
-            blob: file,
-            toType: 'image/jpeg',
-            quality: 0.92,
-          });
-          const blobToUse = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
-          const newFileName = file.name.replace(/\.(heic|heif)$/i, '.jpeg');
-          return new File([blobToUse], newFileName, { type: 'image/jpeg' });
-        }
-        return file;
-      });
-
-      const processedFiles = await Promise.all(conversionPromises);
-
-      setProcessingMessage(`Processing ${processedFiles.length} image${processedFiles.length > 1 ? 's' : ''}...`);
-      
       stepInterval = window.setInterval(() => {
         setCurrentStep(prev => (prev + 1) % processingSteps.length);
       }, 1500);
       
-      const imageUrls = processedFiles.map(file => URL.createObjectURL(file));
-
-      const identificationPromises = processedFiles.map(file => identifyCards(file));
-      const results = await Promise.all(identificationPromises);
-
-      const combinedResult: MultiScanResult = {
-        cards_detected: [],
-        total_detected: 0,
-        originalImageUrls: imageUrls,
-      };
-
-      results.forEach((result, index) => {
-        if (result && result.cards_detected) {
-          combinedResult.total_detected += result.total_detected || 0;
-          const cardsWithImageIndex = result.cards_detected.map(card => ({
-            ...card,
-            imageIndex: index,
-          }));
-          combinedResult.cards_detected.push(...cardsWithImageIndex);
+      // 1. Convert HEIC if necessary
+      setProcessingMessage(`Preparing ${file.name}...`);
+      const fileNameLower = file.name.toLowerCase();
+      let processedFile = file;
+      if ((fileNameLower.endsWith('.heic') || fileNameLower.endsWith('.heif'))) {
+        if (!window.heic2any) {
+          throw new Error("HEIC conversion library failed to load. Please try another format.");
         }
+        setProcessingMessage(`Converting ${file.name}...`);
+        const convertedBlob = await window.heic2any({
+          blob: file, toType: 'image/jpeg', quality: 0.92,
+        });
+        const blobToUse = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+        const newFileName = file.name.replace(/\.(heic|heif)$/i, '.jpeg');
+        processedFile = new File([blobToUse], newFileName, { type: 'image/jpeg' });
+      }
+
+      // 2. Identify all cards in a single, powerful API call
+      setCurrentStep(1);
+      setProcessingMessage("Scanning with Gemini...");
+      const detectedCardsRaw = await identifyCardsInImage(processedFile);
+
+      setCurrentStep(2);
+      setProcessingMessage("Analyzing results...");
+      if (!detectedCardsRaw || detectedCardsRaw.length === 0) {
+        onScanComplete({ cards_detected: [], total_detected: 0, originalImageUrls: [URL.createObjectURL(processedFile)] });
+        return;
+      }
+
+      // 3. Crop images based on bounding boxes returned from the API
+      setCurrentStep(3);
+      setProcessingMessage(`Cropping ${detectedCardsRaw.length} cards...`);
+      const originalImageUrl = URL.createObjectURL(processedFile);
+      const originalImage = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.src = originalImageUrl;
+        img.onload = () => resolve(img);
+        img.onerror = (err) => reject(new Error("Failed to load image for cropping." + err));
       });
 
-      onScanComplete(combinedResult);
+      const PADDING = -4; // Inset for cropping
+      const enrichedCardsPromises = detectedCardsRaw.map(async (card) => {
+          const [x_center_norm, y_center_norm, width_norm, height_norm] = card.bounding_box;
+            
+          const abs_width = width_norm * originalImage.width;
+          const abs_height = height_norm * originalImage.height;
+          const abs_x_center = x_center_norm * originalImage.width;
+          const abs_y_center = y_center_norm * originalImage.height;
+
+          let sx = abs_x_center - (abs_width / 2) - PADDING;
+          let sy = abs_y_center - (abs_height / 2) - PADDING;
+          let sWidth = abs_width + (PADDING * 2);
+          let sHeight = abs_height + (PADDING * 2);
+
+          sx = Math.max(0, sx);
+          sy = Math.max(0, sy);
+          sWidth = Math.min(originalImage.width - sx, sWidth);
+          sHeight = Math.min(originalImage.height - sy, sHeight);
+            
+          const canvas = document.createElement('canvas');
+          canvas.width = sWidth;
+          canvas.height = sHeight;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return { ...card, imageIndex: 0 };
+          
+          ctx.drawImage(originalImage, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
+          
+          const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+          
+          return {
+            ...card,
+            imageIndex: 0,
+            croppedImageUrl: blob ? URL.createObjectURL(blob) : undefined,
+          };
+      });
+
+      const detectedCards: DetectedCard[] = await Promise.all(enrichedCardsPromises);
+      
+      setCurrentStep(4);
+      const finalResult: MultiScanResult = {
+        cards_detected: detectedCards,
+        total_detected: detectedCards.length,
+        originalImageUrls: [originalImageUrl],
+      };
+
+      onScanComplete(finalResult);
 
     } catch (e) {
       if (e instanceof Error) {
@@ -130,7 +173,7 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
     <div className="w-full max-w-2xl flex flex-col items-center">
         <div className="text-center mb-8">
             <h1 className="text-4xl md:text-5xl font-black text-white tracking-tight">AI-Powered TCG Scanner</h1>
-            <p className="mt-3 max-w-md mx-auto text-lg text-gray-400">Upload photos of your Pokémon cards to instantly identify and add them to your collection.</p>
+            <p className="mt-3 max-w-md mx-auto text-lg text-gray-400">Upload a photo of your Pokémon cards to instantly identify and add them to your collection.</p>
         </div>
       <div className="relative w-full p-8 border-2 border-dashed border-gray-600 rounded-xl hover:border-blue-500 transition-colors duration-300 bg-gray-800/50">
         <input
@@ -140,12 +183,12 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
           accept="image/*,.heic,.heif"
           onChange={handleFileChange}
           disabled={isProcessing}
-          multiple
         />
         <label htmlFor="file-upload" className="flex flex-col items-center justify-center text-center cursor-pointer">
           <UploadIcon className="h-12 w-12 text-gray-500 mb-4" />
           <p className="text-lg font-semibold text-white">Click to upload or drag and drop</p>
-          <p className="text-sm text-gray-400">PNG, JPG, WEBP, or HEIC (multiple files supported)</p>
+
+          <p className="text-sm text-gray-400">PNG, JPG, WEBP, or HEIC</p>
         </label>
       </div>
        {error && <p className="mt-4 text-red-400 bg-red-900/50 px-4 py-2 rounded-md">{error}</p>}
