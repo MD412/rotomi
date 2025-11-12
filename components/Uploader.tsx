@@ -1,8 +1,18 @@
-
 import React, { useState, useCallback } from 'react';
 import { identifyCards } from '../services/geminiService';
 import { MultiScanResult } from '../types';
 import { UploadIcon, ProcessingIcon } from './icons';
+
+// Add type declaration for the HEIC conversion library
+declare global {
+  interface Window {
+    heic2any?: (options: {
+      blob: Blob;
+      toType?: string;
+      quality?: number;
+    }) => Promise<Blob | Blob[]>;
+  }
+}
 
 interface UploaderProps {
   onScanComplete: (cardData: MultiScanResult) => void;
@@ -25,53 +35,78 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
 
   const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
-    if (files && files.length > 0) {
+    if (!files || files.length === 0) return;
+
+    setIsProcessing(true);
+    setError(null);
+    setCurrentStep(0);
+    setProcessingMessage(`Preparing ${files.length} image${files.length > 1 ? 's' : ''}...`);
+
+    let stepInterval: number | undefined;
+
+    try {
       const fileArray = Array.from(files);
-      setIsProcessing(true);
-      setError(null);
-      setCurrentStep(0);
-      setProcessingMessage(`Processing ${fileArray.length} image${fileArray.length > 1 ? 's' : ''}...`);
+      
+      const conversionPromises = fileArray.map(async (file) => {
+        const fileNameLower = file.name.toLowerCase();
+        if ((fileNameLower.endsWith('.heic') || fileNameLower.endsWith('.heif'))) {
+          if (!window.heic2any) {
+            throw new Error("HEIC conversion library failed to load. Please try another format.");
+          }
+          setProcessingMessage(`Converting ${file.name}...`);
+          const convertedBlob = await window.heic2any({
+            blob: file,
+            toType: 'image/jpeg',
+            quality: 0.92,
+          });
+          const blobToUse = Array.isArray(convertedBlob) ? convertedBlob[0] : convertedBlob;
+          const newFileName = file.name.replace(/\.(heic|heif)$/i, '.jpeg');
+          return new File([blobToUse], newFileName, { type: 'image/jpeg' });
+        }
+        return file;
+      });
 
+      const processedFiles = await Promise.all(conversionPromises);
 
-      const stepInterval = setInterval(() => {
+      setProcessingMessage(`Processing ${processedFiles.length} image${processedFiles.length > 1 ? 's' : ''}...`);
+      
+      stepInterval = window.setInterval(() => {
         setCurrentStep(prev => (prev + 1) % processingSteps.length);
       }, 1500);
+      
+      const imageUrls = processedFiles.map(file => URL.createObjectURL(file));
 
-      try {
-        const imageUrls = fileArray.map(file => URL.createObjectURL(file));
+      const identificationPromises = processedFiles.map(file => identifyCards(file));
+      const results = await Promise.all(identificationPromises);
 
-        const identificationPromises = fileArray.map(file => identifyCards(file));
-        const results = await Promise.all(identificationPromises);
+      const combinedResult: MultiScanResult = {
+        cards_detected: [],
+        total_detected: 0,
+        originalImageUrls: imageUrls,
+      };
 
-        const combinedResult: MultiScanResult = {
-          cards_detected: [],
-          total_detected: 0,
-          originalImageUrls: imageUrls,
-        };
-
-        results.forEach((result, index) => {
-          if (result && result.cards_detected) {
-            combinedResult.total_detected += result.total_detected || 0;
-            const cardsWithImageIndex = result.cards_detected.map(card => ({
-              ...card,
-              imageIndex: index,
-            }));
-            combinedResult.cards_detected.push(...cardsWithImageIndex);
-          }
-        });
-
-        onScanComplete(combinedResult);
-
-      } catch (e) {
-        if (e instanceof Error) {
-            setError(e.message);
-        } else {
-            setError("An unknown error occurred during processing.");
+      results.forEach((result, index) => {
+        if (result && result.cards_detected) {
+          combinedResult.total_detected += result.total_detected || 0;
+          const cardsWithImageIndex = result.cards_detected.map(card => ({
+            ...card,
+            imageIndex: index,
+          }));
+          combinedResult.cards_detected.push(...cardsWithImageIndex);
         }
-      } finally {
-        clearInterval(stepInterval);
-        setIsProcessing(false);
+      });
+
+      onScanComplete(combinedResult);
+
+    } catch (e) {
+      if (e instanceof Error) {
+          setError(e.message);
+      } else {
+          setError("An unknown error occurred during processing.");
       }
+    } finally {
+      if (stepInterval) clearInterval(stepInterval);
+      setIsProcessing(false);
     }
   }, [onScanComplete]);
 
@@ -102,7 +137,7 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
           type="file"
           id="file-upload"
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-          accept="image/*"
+          accept="image/*,.heic,.heif"
           onChange={handleFileChange}
           disabled={isProcessing}
           multiple
@@ -110,7 +145,7 @@ const Uploader: React.FC<UploaderProps> = ({ onScanComplete }) => {
         <label htmlFor="file-upload" className="flex flex-col items-center justify-center text-center cursor-pointer">
           <UploadIcon className="h-12 w-12 text-gray-500 mb-4" />
           <p className="text-lg font-semibold text-white">Click to upload or drag and drop</p>
-          <p className="text-sm text-gray-400">PNG, JPG, or WEBP (multiple files supported)</p>
+          <p className="text-sm text-gray-400">PNG, JPG, WEBP, or HEIC (multiple files supported)</p>
         </label>
       </div>
        {error && <p className="mt-4 text-red-400 bg-red-900/50 px-4 py-2 rounded-md">{error}</p>}
